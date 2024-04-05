@@ -1,17 +1,129 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { onRequest } from "firebase-functions/v2/https";
-
+import { onDocumentUpdated } from "firebase-functions/v2/firestore";
 import { Context, Probot } from "probot";
 import { BuildModel } from "./models/BuildModel";
 import * as admin from "firebase-admin";
 import { getFirestore } from "firebase-admin/firestore";
 import { WorkflowData } from "./models/WorkFlowData";
+import { createAppAuth } from "@octokit/auth-app";
+import { Octokit } from "@octokit/rest";
 
 const jobsCollectionName = "jobs_v3";
 const workflowCollectionName = "workflows_v1";
 
 admin.initializeApp();
 const firestore = getFirestore();
+
+export const updateCheckStateFunction = onDocumentUpdated(
+  `${jobsCollectionName}/{documentId}`,
+  async (event) => {
+    if (event.data == undefined) {
+      throw new Error("Build model is undefined");
+    }
+    const buildId = event.params.documentId;
+    const oldStatus = event.data.before.data().buildStatus;
+    const newStatus = event.data.after.data().buildStatus;
+    const { checks, platform, workflowId, github } = event.data.after.data();
+
+    const octokit = new Octokit({
+      authStrategy: createAppAuth,
+      auth: {
+        appId: process.env.APP_ID,
+        privateKey: process.env.PRIVATE_KEY,
+        installationId: checks.installationId,
+      },
+    });
+
+    if (oldStatus.failure !== newStatus.failure) {
+      if (newStatus.failure) {
+        const response = await octokit.checks.update({
+          check_run_id: checks.checkRunId,
+          owner: checks.owner,
+          status: "completed",
+          conclusion: "failure",
+          repo: checks.repositoryName,
+        });
+        console.log("Check status updated successfully:");
+        console.log(response.data);
+        console.log(`Build ${buildId}: Failure status changed to true`);
+      }
+    }
+    if (oldStatus.processing !== newStatus.processing) {
+      if (newStatus.processing) {
+        const response = await octokit.checks.update({
+          check_run_id: checks.checkRunId,
+          status: "in_progress",
+          owner: checks.owner,
+          repo: checks.repositoryName,
+        });
+        console.log("Check status updated successfully:");
+        console.log(response.data);
+        console.log(`Build ${buildId}: Processing status changed to true`);
+      }
+    }
+
+    if (oldStatus.success !== newStatus.success) {
+      if (newStatus.success) {
+        const response = await octokit.checks.update({
+          check_run_id: checks.checkRunId,
+          owner: checks.owner,
+          status: "completed",
+          conclusion: "success",
+          repo: checks.repositoryName,
+        });
+        console.log("Check status updated successfully:");
+        console.log(response.data);
+        console.log(`Build ${buildId}: Success status changed to true`);
+        console.log("workflowId", workflowId);
+
+        const workflowQuerySnapshot = await firestore
+          .collection(workflowCollectionName)
+          .where("documentId", "==", workflowId)
+          .get();
+
+        const workflowQueryDocumentSnapshot = workflowQuerySnapshot.docs[0];
+
+        console.log(
+          "workflowQueryDocumentSnapshot",
+          workflowQueryDocumentSnapshot.exists
+        );
+        const workflowData =
+          workflowQueryDocumentSnapshot.data() as WorkflowData;
+
+        const organizationId = workflowData.organizationId;
+
+        const organizationQuerySnapshot = await firestore
+          .collection("organizations")
+          .where("documentId", "==", organizationId)
+          .get();
+
+        const organizationData = organizationQuerySnapshot.docs[0].data();
+
+        let retrievedBuildNumber = 0;
+
+        const { buildNumber } = organizationData;
+
+        if (platform == "ios") {
+          retrievedBuildNumber = buildNumber.ios;
+        } else if (platform == "android") {
+          retrievedBuildNumber = buildNumber.android;
+        }
+
+        await addIssueComment(
+          octokit,
+          platform,
+          workflowData.organizationId,
+          retrievedBuildNumber,
+          workflowData.workflowName,
+          github.issueNumber,
+          checks.owner,
+          checks.repositoryName
+        );
+      }
+    }
+  }
+);
 
 export const probotFunction = onRequest(async (request, response) => {
   const name =
@@ -70,18 +182,10 @@ const appFunction = async (app: Probot) => {
 
       for (const workflowsDocs of workflowQuerySnapshot.docs) {
         const workflowData = workflowsDocs.data();
-        const { baseBranch, platform, workflowName, organizationId } =
+        const { baseBranch, platform, workflowName } =
           workflowData as WorkflowData;
 
-        const buildNumberObject = await getBuildNumberFromOrganization(
-          organizationId
-        );
-        const iosBuildNumber = buildNumberObject.ios;
-        const androidBuildNumber = buildNumberObject.android;
-
         if (pullRequest.base.ref === baseBranch) {
-          const buildNumber =
-            platform === "ios" ? iosBuildNumber : androidBuildNumber;
           const branch = context.payload.pull_request.head.ref;
           const baseBranch = context.payload.pull_request.base.ref;
 
@@ -91,99 +195,69 @@ const appFunction = async (app: Probot) => {
             branch,
             token,
             githubRepositoryUrl,
+            context.payload.pull_request.number,
             platform,
-            workflowsDocs.id
+            workflowsDocs.id,
+            {
+              checkRunId: _checks.data.id,
+              owner: context.payload.repository.owner.login,
+              repositoryName: context.payload.repository.name,
+              installationId: installationId.id,
+              jobId: workflowsDocs.id,
+            }
           );
           await firestore
             .collection(jobsCollectionName)
             .doc(job.documentId)
             .set(job.toJSON());
-
-          firestore
-            .collection(jobsCollectionName)
-            .doc(job.documentId)
-            .withConverter(converter)
-            .onSnapshot(
-              async (
-                snapshot: admin.firestore.DocumentSnapshot<BuildModel>
-              ) => {
-                const buildModel = snapshot.data();
-                if (buildModel == undefined) {
-                  throw new Error("Build model is undefined");
-                }
-                const { processing, failure, success } = buildModel.buildStatus;
-
-                if (processing) {
-                  await updateCheckStateInProgress(
-                    context,
-                    _checks,
-                    workflowName
-                  );
-                }
-                if (failure) {
-                  await updateCheckState(
-                    context,
-                    _checks,
-                    "failure",
-                    workflowName
-                  );
-                }
-                if (success) {
-                  await updateCheckState(
-                    context,
-                    _checks,
-                    "success",
-                    workflowName
-                  );
-
-                  await addIssueComment(
-                    context,
-                    platform,
-                    organizationId,
-                    buildNumber,
-                    workflowName
-                  );
-                }
-              }
-            );
         }
       }
     }
   );
 };
-
 async function addIssueComment(
-  context: Context<"pull_request">,
+  octokit: Octokit,
   platform: string,
   organizationId: string,
   buildNumber: number,
-  workflowName: string
-) {
+  workflowName: string,
+  issueNumber: number,
+  owner: string,
+  repositoryName: string
+): Promise<void> {
   const _issueCommentBody = issueCommentBody(workflowName, buildNumber);
-  const issueComment = context.issue({
-    body: _issueCommentBody,
-  });
 
-  const { data: comments } = await context.octokit.issues.listComments(
-    issueComment
-  );
-
-  const existingComment = comments.find((comment) =>
-    comment.body?.startsWith(issueCommentBodyBase(workflowName))
-  );
-
-  if (existingComment) {
-    await context.octokit.issues.updateComment({
-      owner: context.payload.repository.owner.login,
-      repo: context.payload.repository.name,
-      comment_id: existingComment.id,
-      body: _issueCommentBody,
+  try {
+    const { data: comments } = await octokit.rest.issues.listComments({
+      owner: owner,
+      repo: repositoryName,
+      issue_number: issueNumber,
     });
-  } else {
-    await context.octokit.issues.createComment(issueComment);
-  }
 
-  await updateBuildNumber(platform, organizationId, buildNumber);
+    const existingComment = comments.find((comment) =>
+      comment.body?.startsWith(issueCommentBodyBase(workflowName))
+    );
+
+    if (existingComment) {
+      await octokit.rest.issues.updateComment({
+        owner: owner,
+        repo: repositoryName,
+        comment_id: existingComment.id,
+        body: _issueCommentBody,
+      });
+    } else {
+      await octokit.rest.issues.createComment({
+        owner: owner,
+        repo: repositoryName,
+        issue_number: issueNumber,
+        body: _issueCommentBody,
+      });
+    }
+
+    await updateBuildNumber(platform, organizationId, buildNumber);
+  } catch (error) {
+    console.error("Error adding or updating issue comment:", error);
+  }
 }
 
 async function updateBuildNumber(
@@ -219,75 +293,6 @@ async function getWorkflowQuerySnapshot(githubRepositoryUrl: string) {
     throw new Error("OpenCI could not find the repository in our database.");
   }
   return workflowQuerySnapshot;
-}
-
-async function getBuildNumberFromOrganization(organizationId: string) {
-  const orgDocs = await firestore
-    .collection("organizations")
-    .doc(organizationId)
-    .get();
-
-  if (!orgDocs.exists) {
-    throw new Error(`Organization with ID ${organizationId} does not exist.`);
-  }
-
-  const orgData = orgDocs.data();
-  if (orgData == undefined) {
-    throw new Error("Organization data is undefined");
-  }
-
-  const { buildNumber } = orgData;
-  return buildNumber;
-}
-
-const converter = {
-  toFirestore(buildModel: BuildModel): admin.firestore.DocumentData {
-    return buildModel.toJSON();
-  },
-  fromFirestore(snapshot: admin.firestore.QueryDocumentSnapshot): BuildModel {
-    const data = snapshot.data() as admin.firestore.DocumentData;
-    return BuildModel.fromJSON(data);
-  },
-};
-
-async function updateCheckStateInProgress(
-  context: Context<"pull_request">,
-  checks: any,
-  name: string
-) {
-  try {
-    return await context.octokit.checks.update({
-      owner: context.payload.repository.owner.login,
-      repo: context.payload.repository.name,
-      name: name,
-      check_run_id: checks.data.id,
-      status: "in_progress",
-    });
-  } catch (error) {
-    console.error("Failed to create check suite:", error);
-    throw error;
-  }
-}
-
-async function updateCheckState(
-  context: Context<"pull_request">,
-  checks: any,
-  conclusion: any,
-  name: string
-) {
-  try {
-    return await context.octokit.checks.update({
-      owner: context.payload.repository.owner.login,
-      repo: context.payload.repository.name,
-      name: name,
-      check_run_id: checks.data.id,
-      conclusion: conclusion,
-      completed_at: new Date().toISOString(),
-    });
-  } catch (error) {
-    console.error("Failed to create check suite:", error);
-    throw error;
-  }
 }
 
 async function createChecks(context: Context<"pull_request">, name: string) {

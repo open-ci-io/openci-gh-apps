@@ -1,6 +1,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import * as admin from "firebase-admin";
 const { v4: uuidv4 } = require("uuid");
+
 export class BuildModel {
   readonly buildStatus: {
     readonly processing: boolean;
@@ -14,19 +15,35 @@ export class BuildModel {
   readonly github: {
     readonly PAT: string;
     readonly repositoryUrl: string;
+    readonly issueNumber?: number;
   };
   readonly createdAt: admin.firestore.FieldValue;
   readonly documentId: string;
   readonly platform: string;
   readonly workflowId: string;
+  readonly checks: {
+    readonly checkRunId: number;
+    readonly owner: string;
+    readonly repositoryName: string;
+    readonly installationId: number;
+    readonly jobId: string;
+  };
 
   constructor(
     baseBranch: string,
     buildBranch: string,
     token: string,
     githubRepositoryUrl: string,
+    issueNumber: number,
     platform: string,
     workflowId: string,
+    checks: {
+      checkRunId: number;
+      owner: string;
+      repositoryName: string;
+      installationId: number;
+      jobId: string;
+    },
     buildStatus?: {
       processing: boolean;
       failure: boolean;
@@ -45,11 +62,13 @@ export class BuildModel {
     this.github = {
       PAT: token,
       repositoryUrl: githubRepositoryUrl,
+      issueNumber: issueNumber,
     };
     this.createdAt = admin.firestore.FieldValue.serverTimestamp();
     this.documentId = uuidv4();
     this.platform = platform;
     this.workflowId = workflowId;
+    this.checks = checks;
   }
 
   toJSON() {
@@ -61,6 +80,7 @@ export class BuildModel {
       documentId: this.documentId,
       platform: this.platform,
       workflowId: this.workflowId,
+      checks: this.checks,
     };
   }
 
@@ -72,7 +92,9 @@ export class BuildModel {
       json.github.repositoryUrl,
       json.platform,
       json.workflowId,
-      json.buildStatus
+      json.checks,
+      json.buildStatus,
+      json.github.issueNumber
     );
   }
 }
