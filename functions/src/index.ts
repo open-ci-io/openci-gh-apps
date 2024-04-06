@@ -8,12 +8,47 @@ import { getFirestore } from "firebase-admin/firestore";
 import { WorkflowData } from "./models/WorkFlowData";
 import { createAppAuth } from "@octokit/auth-app";
 import { Octokit } from "@octokit/rest";
+const { v4: uuidv4 } = require("uuid");
 
 const jobsCollectionName = "jobs_v3";
 const workflowCollectionName = "workflows_v1";
 
 admin.initializeApp();
 const firestore = getFirestore();
+
+exports.getInstallationToken = onRequest(async (req, res) => {
+  if (req.method !== "POST") {
+    res.status(405).send("Method Not Allowed");
+    return;
+  }
+
+  const { appId, privateKey, installationId } = req.body;
+
+  if (!appId || !privateKey || !installationId) {
+    res.status(400).send("Missing required parameters");
+    return;
+  }
+
+  const appOctokit = new Octokit({
+    authStrategy: createAppAuth,
+    auth: {
+      appId: appId,
+      privateKey: privateKey,
+      installationId: installationId,
+    },
+  });
+
+  try {
+    const { data } = await appOctokit.rest.apps.createInstallationAccessToken({
+      installation_id: installationId,
+    });
+
+    res.status(200).json({ installationToken: data.token });
+  } catch (error) {
+    console.error("Error creating installation token:", error);
+    res.status(500).send("Internal Server Error");
+  }
+});
 
 export const updateCheckStateFunction = onDocumentUpdated(
   `${jobsCollectionName}/{documentId}`,
@@ -24,25 +59,26 @@ export const updateCheckStateFunction = onDocumentUpdated(
     const buildId = event.params.documentId;
     const oldStatus = event.data.before.data().buildStatus;
     const newStatus = event.data.after.data().buildStatus;
-    const { checks, platform, workflowId, github } = event.data.after.data();
+    const { platform, workflowId, github, githubChecks } =
+      event.data.after.data();
 
     const octokit = new Octokit({
       authStrategy: createAppAuth,
       auth: {
         appId: process.env.APP_ID,
         privateKey: process.env.PRIVATE_KEY,
-        installationId: checks.installationId,
+        installationId: github.installationId,
       },
     });
 
     if (oldStatus.failure !== newStatus.failure) {
       if (newStatus.failure) {
         const response = await octokit.checks.update({
-          check_run_id: checks.checkRunId,
-          owner: checks.owner,
+          check_run_id: githubChecks.checkRunId,
+          owner: github.owner,
           status: "completed",
           conclusion: "failure",
-          repo: checks.repositoryName,
+          repo: github.repositoryName,
         });
         console.log("Check status updated successfully:");
         console.log(response.data);
@@ -52,10 +88,10 @@ export const updateCheckStateFunction = onDocumentUpdated(
     if (oldStatus.processing !== newStatus.processing) {
       if (newStatus.processing) {
         const response = await octokit.checks.update({
-          check_run_id: checks.checkRunId,
+          check_run_id: githubChecks.checkRunId,
           status: "in_progress",
-          owner: checks.owner,
-          repo: checks.repositoryName,
+          owner: github.owner,
+          repo: github.repositoryName,
         });
         console.log("Check status updated successfully:");
         console.log(response.data);
@@ -66,11 +102,11 @@ export const updateCheckStateFunction = onDocumentUpdated(
     if (oldStatus.success !== newStatus.success) {
       if (newStatus.success) {
         const response = await octokit.checks.update({
-          check_run_id: checks.checkRunId,
-          owner: checks.owner,
+          check_run_id: githubChecks.checkRunId,
+          owner: github.owner,
           status: "completed",
           conclusion: "success",
-          repo: checks.repositoryName,
+          repo: github.repositoryName,
         });
         console.log("Check status updated successfully:");
         console.log(response.data);
@@ -116,9 +152,9 @@ export const updateCheckStateFunction = onDocumentUpdated(
           workflowData.organizationId,
           retrievedBuildNumber,
           workflowData.workflowName,
-          github.issueNumber,
-          checks.owner,
-          checks.repositoryName
+          githubChecks.issueNumber,
+          github.owner,
+          github.repositoryName
         );
       }
     }
@@ -171,11 +207,6 @@ const appFunction = async (app: Probot) => {
         throw new Error("installationId is null, please check it.");
       }
 
-      const octokit = await app.auth(installationId.id);
-      const { token } = (await octokit.auth({ type: "installation" })) as {
-        token: string;
-      };
-
       const workflowQuerySnapshot = await getWorkflowQuerySnapshot(
         githubRepositoryUrl
       );
@@ -186,30 +217,53 @@ const appFunction = async (app: Probot) => {
           workflowData as WorkflowData;
 
         if (pullRequest.base.ref === baseBranch) {
-          const branch = context.payload.pull_request.head.ref;
+          const buildBranch = context.payload.pull_request.head.ref;
           const baseBranch = context.payload.pull_request.base.ref;
 
           const _checks = await createChecks(context, workflowName);
+
+          const buildStatus = {
+            processing: false,
+            failure: false,
+            success: false,
+          };
+          const branch = {
+            baseBranch: baseBranch,
+            buildBranch: buildBranch,
+          };
+          const githubChecks = {
+            issueNumber: context.payload.pull_request.number,
+            checkRunId: _checks.data.id,
+          };
+
+          const appId = process.env.APP_ID;
+          if (appId == undefined) {
+            throw new Error("appId is null, please check it.");
+          }
+
+          const github = {
+            repositoryUrl: githubRepositoryUrl,
+            owner: context.payload.repository.owner.login,
+            repositoryName: context.payload.repository.name,
+            installationId: installationId.id,
+            appId: Number(appId),
+          };
+          const createdAt = admin.firestore.FieldValue.serverTimestamp();
+          const documentId = uuidv4();
           const job = new BuildModel(
-            baseBranch,
+            buildStatus,
             branch,
-            token,
-            githubRepositoryUrl,
-            context.payload.pull_request.number,
+            githubChecks,
+            github,
+            createdAt,
+            documentId,
             platform,
-            workflowsDocs.id,
-            {
-              checkRunId: _checks.data.id,
-              owner: context.payload.repository.owner.login,
-              repositoryName: context.payload.repository.name,
-              installationId: installationId.id,
-              jobId: workflowsDocs.id,
-            }
+            workflowsDocs.id
           );
           await firestore
             .collection(jobsCollectionName)
             .doc(job.documentId)
-            .set(job.toJSON());
+            .set(job.toJson());
         }
       }
     }
