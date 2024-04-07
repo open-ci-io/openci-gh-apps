@@ -5,7 +5,6 @@ import { Context, Probot } from "probot";
 import { BuildModel } from "./models/BuildModel";
 import * as admin from "firebase-admin";
 import { getFirestore } from "firebase-admin/firestore";
-import { WorkflowData } from "./models/WorkFlowData";
 import { createAppAuth } from "@octokit/auth-app";
 import { Octokit } from "@octokit/rest";
 const { v4: uuidv4 } = require("uuid");
@@ -124,8 +123,7 @@ export const updateCheckStateFunction = onDocumentUpdated(
           "workflowQueryDocumentSnapshot",
           workflowQueryDocumentSnapshot.exists
         );
-        const workflowData =
-          workflowQueryDocumentSnapshot.data() as WorkflowData;
+        const workflowData = workflowQueryDocumentSnapshot.data();
 
         const organizationId = workflowData.organizationId;
 
@@ -149,7 +147,7 @@ export const updateCheckStateFunction = onDocumentUpdated(
         await addIssueComment(
           octokit,
           platform,
-          workflowData.organizationId,
+          organizationId,
           retrievedBuildNumber,
           workflowData.workflowName,
           githubChecks.issueNumber,
@@ -213,10 +211,9 @@ const appFunction = async (app: Probot) => {
 
       for (const workflowsDocs of workflowQuerySnapshot.docs) {
         const workflowData = workflowsDocs.data();
-        const { baseBranch, platform, workflowName } =
-          workflowData as WorkflowData;
+        const { github, platform, workflowName } = workflowData;
 
-        if (pullRequest.base.ref === baseBranch) {
+        if (pullRequest.base.ref === github.baseBranch) {
           const buildBranch = context.payload.pull_request.head.ref;
           const baseBranch = context.payload.pull_request.base.ref;
 
@@ -340,7 +337,7 @@ function issueCommentBodyBase(workflowName: string) {
 async function getWorkflowQuerySnapshot(githubRepositoryUrl: string) {
   const workflowQuerySnapshot = await firestore
     .collection(workflowCollectionName)
-    .where("githubRepositoryUrl", "==", githubRepositoryUrl)
+    .where("github.repositoryUrl", "==", githubRepositoryUrl)
     .get();
 
   if (workflowQuerySnapshot.empty) {
