@@ -154,6 +154,12 @@ export const updateCheckStateFunction = onDocumentUpdated(
           github.owner,
           github.repositoryName
         );
+
+        const buildNumberField = `buildNumber.${platform}`;
+        await firestore
+          .collection("organizations")
+          .doc(organizationId)
+          .update({ [buildNumberField]: retrievedBuildNumber + 1 });
       }
     }
   }
@@ -304,26 +310,9 @@ async function addIssueComment(
         body: _issueCommentBody,
       });
     }
-
-    await updateBuildNumber(platform, organizationId, buildNumber);
   } catch (error) {
     console.error("Error adding or updating issue comment:", error);
   }
-}
-
-async function updateBuildNumber(
-  platform: string,
-  organizationId: string,
-  buildNumber: number
-) {
-  const updateField = platform === "android" ? "android" : "ios";
-
-  const body = {
-    buildNumber: {
-      [updateField]: buildNumber + 1,
-    },
-  };
-  await firestore.collection("organizations").doc(organizationId).update(body);
 }
 
 function issueCommentBody(workflowName: string, buildNumber: number) {
