@@ -8,6 +8,8 @@ import { getFirestore } from "firebase-admin/firestore";
 import { createAppAuth } from "@octokit/auth-app";
 import { Octokit } from "@octokit/rest";
 const { v4: uuidv4 } = require("uuid");
+const jwt = require("jsonwebtoken");
+const axios = require("axios");
 
 const jobsCollectionName = "jobs_v3";
 const workflowCollectionName = "workflows_v1";
@@ -15,7 +17,62 @@ const workflowCollectionName = "workflows_v1";
 admin.initializeApp();
 const firestore = getFirestore();
 
-exports.getInstallationToken = onRequest(async (req, res) => {
+export const getLatestBuildVersionAndNumber = onRequest(async (req, res) => {
+  if (req.method !== "POST") {
+    res.status(405).send("Method Not Allowed");
+    return;
+  }
+
+  const { appId, keyId, issuerId, privateKey } = req.body;
+
+  if (!appId || !keyId || !issuerId || !privateKey) {
+    res.status(400).send("Missing required parameters");
+    return;
+  }
+
+  const token = jwt.sign(
+    {
+      iss: issuerId,
+      exp: Math.floor(Date.now() / 1000) + 20 * 60,
+      aud: "appstoreconnect-v1",
+    },
+    privateKey,
+    {
+      algorithm: "ES256",
+      header: {
+        kid: keyId,
+      },
+    }
+  );
+
+  try {
+    const baseUrl = "https://api.appstoreconnect.apple.com/v1";
+    const appsResponse = await axios({
+      method: "get",
+      url: `${baseUrl}/apps/${appId}/appStoreVersions?filter[appStoreState]=READY_FOR_SALE`,
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    });
+    const appVersion = appsResponse.data.data[0].attributes.versionString;
+
+    const buildResponse = await axios({
+      method: "get",
+      url: `${baseUrl}/builds?filter[processingState]=VALID&filter[preReleaseVersion.version]=${appVersion}&include=preReleaseVersion`,
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    });
+    const buildNumber = buildResponse.data.data[0].attributes.version;
+
+    res.status(200).json({ version: appVersion, buildNumber: buildNumber });
+  } catch (error) {
+    console.error("Error creating installation token:", error);
+    res.status(500).send("Internal Server Error");
+  }
+});
+
+export const getInstallationToken = onRequest(async (req, res) => {
   if (req.method !== "POST") {
     res.status(405).send("Method Not Allowed");
     return;
