@@ -146,8 +146,6 @@ export const updateCheckStateFunction = onDocumentUpdated(
 
         await addIssueComment(
           octokit,
-          platform,
-          organizationId,
           retrievedBuildNumber,
           workflowData.workflowName,
           githubChecks.issueNumber,
@@ -207,6 +205,8 @@ const appFunction = async (app: Probot) => {
       const pullRequest = context.payload.pull_request;
       const installationId = context.payload.installation;
       const githubRepositoryUrl = pullRequest.base.repo.html_url;
+      const baseBranch = pullRequest.base.ref;
+      const currentBranch = pullRequest.head.ref;
       if (installationId == null) {
         throw new Error("installationId is null, please check it.");
       }
@@ -218,10 +218,21 @@ const appFunction = async (app: Probot) => {
       for (const workflowsDocs of workflowQuerySnapshot.docs) {
         const workflowData = workflowsDocs.data();
         const { github, platform, workflowName } = workflowData;
+        const branchPattern = github.branchPattern;
+        let condition = false;
 
-        if (pullRequest.base.ref === github.baseBranch) {
-          const buildBranch = context.payload.pull_request.head.ref;
-          const baseBranch = context.payload.pull_request.base.ref;
+        if (github.baseBranch == baseBranch) {
+          if (branchPattern == undefined) {
+            condition = true;
+          } else if (branchPattern != undefined) {
+            if (currentBranch.includes(branchPattern)) {
+              condition = true;
+            }
+          }
+        }
+
+        if (condition) {
+          const buildBranch = pullRequest.head.ref;
 
           const _checks = await createChecks(context, workflowName);
 
@@ -274,8 +285,6 @@ const appFunction = async (app: Probot) => {
 };
 async function addIssueComment(
   octokit: Octokit,
-  platform: string,
-  organizationId: string,
   buildNumber: number,
   workflowName: string,
   issueNumber: number,
