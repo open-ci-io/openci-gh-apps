@@ -13,7 +13,7 @@ interface Branch {
 }
 
 interface GithubChecks {
-  issueNumber: number;
+  issueNumber: number | null;
   checkRunId: number;
 }
 

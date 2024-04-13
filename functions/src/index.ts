@@ -257,41 +257,35 @@ const appFunction = async (app: Probot) => {
       "pull_request.synchronize",
       // this is for debug
       "pull_request.edited",
+      "push",
     ],
-    async (context: Context<"pull_request">) => {
-      const pullRequest = context.payload.pull_request;
-      const installationId = context.payload.installation;
-      const githubRepositoryUrl = pullRequest.base.repo.html_url;
-      const baseBranch = pullRequest.base.ref;
-      const currentBranch = pullRequest.head.ref;
-      if (installationId == null) {
-        throw new Error("installationId is null, please check it.");
-      }
+    async (context: Context<"pull_request"> | Context<"push">) => {
+      if (context.name == "push") {
+        const pushContext = context as Context<"push">;
+        const branchName = pushContext.payload.ref.replace("refs/heads/", "");
+        console.log("branchName", branchName);
+        const _payload = pushContext.payload;
 
-      const workflowQuerySnapshot = await getWorkflowQuerySnapshot(
-        githubRepositoryUrl
-      );
+        const repositoryUrl = _payload.repository.html_url;
+        const installationId = _payload.installation;
 
-      for (const workflowsDocs of workflowQuerySnapshot.docs) {
-        const workflowData = workflowsDocs.data();
-        const { github, platform, workflowName } = workflowData;
-        const branchPattern = github.branchPattern;
-        let condition = false;
-
-        if (github.baseBranch == baseBranch) {
-          if (branchPattern == undefined) {
-            condition = true;
-          } else if (branchPattern != undefined) {
-            if (currentBranch.includes(branchPattern)) {
-              condition = true;
-            }
-          }
+        if (installationId == undefined) {
+          throw new Error("installationId is null, please check it.");
+        }
+        if (branchName == undefined) {
+          throw new Error("branchName is null, please check it.");
         }
 
-        if (condition) {
-          const buildBranch = pullRequest.head.ref;
+        const workflowQuerySnapshot = await getWorkflowQuerySnapshot(
+          repositoryUrl,
+          "push"
+        );
 
-          const _checks = await createChecks(context, workflowName);
+        for (const workflowsDocs of workflowQuerySnapshot.docs) {
+          const workflowData = workflowsDocs.data();
+          const { platform, workflowName } = workflowData;
+
+          const _checks = await createChecks(pushContext, workflowName);
 
           const buildStatus = {
             processing: false,
@@ -299,11 +293,12 @@ const appFunction = async (app: Probot) => {
             success: false,
           };
           const branch = {
-            baseBranch: baseBranch,
-            buildBranch: buildBranch,
+            baseBranch: branchName,
+            buildBranch: branchName,
           };
+
           const githubChecks = {
-            issueNumber: context.payload.pull_request.number,
+            issueNumber: null,
             checkRunId: _checks.data.id,
           };
 
@@ -313,7 +308,7 @@ const appFunction = async (app: Probot) => {
           }
 
           const github = {
-            repositoryUrl: githubRepositoryUrl,
+            repositoryUrl: repositoryUrl,
             owner: context.payload.repository.owner.login,
             repositoryName: context.payload.repository.name,
             installationId: installationId.id,
@@ -336,18 +331,109 @@ const appFunction = async (app: Probot) => {
             .doc(job.documentId)
             .set(job.toJson());
         }
+      } else if (context.name == "pull_request") {
+        const pullRequestContext = context as Context<"pull_request">;
+        const _payload = pullRequestContext.payload;
+
+        const pullRequest = _payload.pull_request;
+        const installationId = _payload.installation;
+        const githubRepositoryUrl = pullRequest.base.repo.html_url;
+        const baseBranch = pullRequest.base.ref;
+        const currentBranch = pullRequest.head.ref;
+        if (installationId == null) {
+          throw new Error("installationId is null, please check it.");
+        }
+
+        const workflowQuerySnapshot = await getWorkflowQuerySnapshot(
+          githubRepositoryUrl,
+          "pullRequest"
+        );
+
+        for (const workflowsDocs of workflowQuerySnapshot.docs) {
+          const workflowData = workflowsDocs.data();
+          const { github, platform, workflowName } = workflowData;
+          const branchPattern = github.branchPattern;
+          let condition = false;
+
+          if (github.baseBranch == baseBranch) {
+            if (branchPattern == undefined) {
+              condition = true;
+            } else if (branchPattern != undefined) {
+              if (currentBranch.includes(branchPattern)) {
+                condition = true;
+              }
+            }
+          }
+
+          if (condition) {
+            const buildBranch = pullRequest.head.ref;
+
+            const _checks = await createChecks(
+              pullRequestContext,
+              workflowName
+            );
+
+            const buildStatus = {
+              processing: false,
+              failure: false,
+              success: false,
+            };
+            const branch = {
+              baseBranch: baseBranch,
+              buildBranch: buildBranch,
+            };
+            const githubChecks = {
+              issueNumber: pullRequestContext.payload.pull_request.number,
+              checkRunId: _checks.data.id,
+            };
+
+            const appId = process.env.APP_ID;
+            if (appId == undefined) {
+              throw new Error("appId is null, please check it.");
+            }
+
+            const github = {
+              repositoryUrl: githubRepositoryUrl,
+              owner: context.payload.repository.owner.login,
+              repositoryName: context.payload.repository.name,
+              installationId: installationId.id,
+              appId: Number(appId),
+            };
+            const createdAt = admin.firestore.FieldValue.serverTimestamp();
+            const documentId = uuidv4();
+            const job = new BuildModel(
+              buildStatus,
+              branch,
+              githubChecks,
+              github,
+              createdAt,
+              documentId,
+              platform,
+              workflowsDocs.id
+            );
+            await firestore
+              .collection(jobsCollectionName)
+              .doc(job.documentId)
+              .set(job.toJson());
+          }
+        }
       }
     }
   );
 };
+
 async function addIssueComment(
   octokit: Octokit,
-  buildNumber: number,
+  buildNumber: number | null,
   workflowName: string,
   issueNumber: number,
   owner: string,
   repositoryName: string
 ): Promise<void> {
+  if (buildNumber == null) {
+    console.log("Build number is null, skipping adding issue comment.");
+    return;
+  }
   const _issueCommentBody = issueCommentBody(workflowName, buildNumber);
 
   try {
@@ -389,10 +475,16 @@ function issueCommentBodyBase(workflowName: string) {
   return `${workflowName}: Build Number:`;
 }
 
-async function getWorkflowQuerySnapshot(githubRepositoryUrl: string) {
+async function getWorkflowQuerySnapshot(
+  githubRepositoryUrl: string,
+  triggerType: string
+) {
+  console.log("githubRepositoryUrl", githubRepositoryUrl);
+  console.log("triggerType", triggerType);
   const workflowQuerySnapshot = await firestore
     .collection(workflowCollectionName)
     .where("github.repositoryUrl", "==", githubRepositoryUrl)
+    .where("github.triggerType", "==", triggerType)
     .get();
 
   if (workflowQuerySnapshot.empty) {
@@ -401,12 +493,23 @@ async function getWorkflowQuerySnapshot(githubRepositoryUrl: string) {
   return workflowQuerySnapshot;
 }
 
-async function createChecks(context: Context<"pull_request">, name: string) {
+async function createChecks(
+  context: Context<"pull_request"> | Context<"push">,
+  name: string
+) {
+  let headSha = "";
+  if (context.name == "pull_request") {
+    const _context = context as Context<"pull_request">;
+    headSha = _context.payload.pull_request.head.sha;
+  } else if (context.name == "push") {
+    const _context = context as Context<"push">;
+    headSha = _context.payload.after;
+  }
   try {
     return await context.octokit.checks.create({
       owner: context.payload.repository.owner.login,
       repo: context.payload.repository.name,
-      head_sha: context.payload.pull_request.head.sha,
+      head_sha: headSha,
       name: name,
       status: "queued",
     });
