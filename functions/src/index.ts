@@ -283,7 +283,12 @@ const appFunction = async (app: Probot) => {
 
         for (const workflowsDocs of workflowQuerySnapshot.docs) {
           const workflowData = workflowsDocs.data();
-          const { platform, workflowName } = workflowData;
+          const { platform, workflowName, github } = workflowData;
+
+          if (github.baseBranch !== branchName) {
+            console.log("Branch name does not match, skipping.");
+            continue;
+          }
 
           const _checks = await createChecks(pushContext, workflowName);
 
@@ -307,7 +312,7 @@ const appFunction = async (app: Probot) => {
             throw new Error("appId is null, please check it.");
           }
 
-          const github = {
+          const _github = {
             repositoryUrl: repositoryUrl,
             owner: context.payload.repository.owner.login,
             repositoryName: context.payload.repository.name,
@@ -320,7 +325,7 @@ const appFunction = async (app: Probot) => {
             buildStatus,
             branch,
             githubChecks,
-            github,
+            _github,
             createdAt,
             documentId,
             platform,
